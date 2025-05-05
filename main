@@ -1,11 +1,6 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
-# Copyright (c) 2025 Smokeyk00
-# Author: Smokeyk00
-# License: MIT | https://github.com/Smokeyk00
-# Source: https://creality.com/
-
-# === Funktionsdeklaration ===
+# Funktioner för loggning och status
 source /dev/stdin <<<"$FUNCTIONS_FILE_PATH"
 color
 verb_ip6
@@ -14,73 +9,74 @@ setting_up_container
 network_check
 update_os
 
-# === Installera nödvändiga beroenden ===
-msg_info "Installerar beroenden för Creality Print"
-$STD apt-get install -y git \
-  libyaml-dev \
-  build-essential \
-  curl \
-  wget \
-  sudo
-msg_ok "Installerade beroenden"
+# Hitta nästa lediga CTID
+msg_info "Hämtar nästa lediga CTID..."
+CTID=$(pct list | awk '{print $1}' | grep -v CTID | sort -n | tail -n 1)
+CTID=$((CTID + 1))
 
-# === Installera Creality Print ===
-msg_info "Installerar Creality Print"
-$STD sudo -u creality bash <<EOF
-curl -sSL https://crealityprint-installers.creality.com/crealityprint-installer.sh | bash
-EOF
-msg_ok "Installerade Creality Print"
+# Kontrollera om template finns, annars ladda ner den
+msg_info "🔍 Kollar efter Debian-template..."
+if ! pveam list | grep -q "debian-12-standard_2023-*.tar.zst"; then
+    msg_info "📥 Hämtar template..."
+    pveam update
+    pveam download local debian-12-standard_2023-12-09.tar.zst
+fi
 
-# === Skapa användare för Creality Print ===
-msg_info "Skapar användare för Creality Print"
-useradd -m -s /bin/bash -p $(openssl passwd -1 creality) creality
-usermod -aG sudo,tty,dialout creality
-chown -R creality:creality /opt
-echo "creality ALL=NOPASSWD: $(command -v systemctl) restart crealityprint, $(command -v reboot), $(command -v poweroff)" >/etc/sudoers.d/creality
-msg_ok "Skapade användare för Creality Print"
+# Skapa LXC-container
+msg_info "🚧 Skapar LXC-container med CTID: $CTID..."
+pct create $CTID local:vztmpl/debian-12-standard_2023-*.tar.zst \
+    --hostname "crealityprint" \
+    --cores 2 \
+    --memory 2048 \
+    --rootfs local-lvm:8G \
+    --net0 name=eth0,bridge=vmbr0,ip=dhcp \
+    --ostype debian \
+    --features nesting=1 \
+    --unprivileged 1 \
+    --start 1
 
-# === Installera Creality Cloud Integration ===
-msg_info "Installerar Creality Cloud Integration"
-$STD sudo -u creality bash <<EOF
-curl -sSL https://cloud.creality.com/installer.sh | bash
-EOF
-msg_ok "Installerade Creality Cloud Integration"
+# Installera Creality Print och KasmVNC
+msg_info "🔧 Installerar Creality Print & KasmVNC i container..."
 
-# === Skapa systemd service för Creality Print ===
-msg_info "Skapar systemd-tjänst för Creality Print"
-cat <<EOF >/etc/systemd/system/crealityprint.service
-[Unit]
-Description=Creality Print Web Interface
-After=network-online.target
-Wants=network-online.target
+pct exec $CTID -- bash -c "
+# Uppdatera och installera beroenden
+apt update &&
+apt install -y wget curl sudo unzip git xz-utils software-properties-common \
+    libfuse2 libx11-xcb1 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 \
+    libxcb-xinerama0 libxss1 libnss3 libatk1.0-0 libatk-bridge2.0-0 libgtk-3-0 libasound2 \
+    xfce4 xfce4-goodies ca-certificates
 
-[Service]
-Environment="LC_ALL=C.UTF-8"
-Environment="LANG=C.UTF-8"
-Type=exec
-User=creality
-ExecStart=/opt/crealityprint/bin/crealityprint serve
+# Skapa användare för Creality Print
+useradd -m creality && echo 'creality:creality' | chpasswd && usermod -aG sudo creality
 
-[Install]
-WantedBy=multi-user.target
-EOF
-systemctl enable -q --now crealityprint
-msg_ok "Skapade systemd-tjänst för Creality Print"
+# Hämta och installera Creality Print
+cd /home/creality
+wget https://github.com/CrealityOfficial/CrealityPrint/releases/latest/download/Creality_Print_Linux.zip
+unzip Creality_Print_Linux.zip
+chmod +x ./CrealityPrint.AppImage
+./CrealityPrint.AppImage --appimage-extract
+ln -s /home/creality/squashfs-root/AppRun /usr/local/bin/crealityprint
+chown -R creality:creality /home/creality
+"
 
-# === Installera och konfigurera NGINX för webbadressåtkomst ===
-msg_info "Installerar och konfigurerar NGINX"
-$STD apt-get install -y nginx
-systemctl enable nginx
-systemctl start nginx
-msg_ok "Installerade och startade NGINX"
+# Installera KasmVNC-server
+msg_info "🌐 Installerar KasmVNC..."
+pct exec $CTID -- bash -c "
+cd /opt
+wget https://github.com/kasmtech/KasmVNC/releases/latest/download/kasmvnc_server_linux.tar.gz
+tar -xzf kasmvnc_server_linux.tar.gz
+cd kasmvnc_server
+./install.sh --user creality --desktop xfce
+"
 
-# === Rensa upp efter installation ===
-msg_info "Rensar upp efter installation"
-$STD apt-get -y autoremove
-$STD apt-get -y autoclean
-msg_ok "Rensat upp"
+# Konfigurera autostart för Creality Print via VNC
+msg_info "⚙️ Konfigurerar autostart av Creality Print..."
+pct exec $CTID -- bash -c "
+echo 'crealityprint &' >> /home/creality/.xprofile
+chown creality:creality /home/creality/.xprofile
+"
 
-# === Bekräftelse ===
-msg_info "Creality Print installation klar!"
-msg_info "Åtkomst till Creality Print via webbläsaren på http://<din-server-ip>:80"
-
+# Slutföra installation
+msg_ok "✅ Installation klar!"
+msg_info "➡️ Gå till: http://<din-server-ip>:6901 för att använda Creality Print i webbläsaren"
+msg_info "🧑‍💻 Inloggning: användare 'creality' / lösenord 'creality'"
