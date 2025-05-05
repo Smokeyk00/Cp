@@ -1,76 +1,86 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# === Konfiguration ===
-CTID=112                            # Välj en ledig CT ID
-HOSTNAME="crealityprint"            # Namn på containern
-DISK_SIZE="8G"                      # Diskstorlek
-MEMORY="2048"                       # RAM i MB
-CORES="2"                           # Antal CPU-kärnor
-TEMPLATE="debian-12-standard_*.tar.zst" # LXC-template
-STORAGE="local-lvm"                 # Din Proxmox-lagring
-BRIDGE="vmbr0"                      # Nätverksinterface
+# Copyright (c) 2025 Smokeyk00
+# Author: Smokeyk00
+# License: MIT | https://github.com/Smokeyk00
+# Source: https://creality.com/
 
-# === Kontrollera och hämta template ===
-echo "🔍 Kontrollerar template..."
-if ! pveam available | grep -q "$TEMPLATE"; then
-    echo "📥 Hämtar template..."
-    pveam update
-    pveam download local debian-12-standard_2023-*.tar.zst
-fi
+# === Funktionsdeklaration ===
+source /dev/stdin <<<"$FUNCTIONS_FILE_PATH"
+color
+verb_ip6
+catch_errors
+setting_up_container
+network_check
+update_os
 
-# === Skapa LXC-container ===
-echo "🚧 Skapar LXC-container..."
-pct create $CTID local:vztmpl/$TEMPLATE \
-    --hostname $HOSTNAME \
-    --cores $CORES \
-    --memory $MEMORY \
-    --rootfs $STORAGE:$DISK_SIZE \
-    --net0 name=eth0,bridge=$BRIDGE,ip=dhcp \
-    --ostype debian \
-    --features nesting=1 \
-    --unprivileged 1 \
-    --start 1
+# === Installera nödvändiga beroenden ===
+msg_info "Installerar beroenden för Creality Print"
+$STD apt-get install -y git \
+  libyaml-dev \
+  build-essential \
+  curl \
+  wget \
+  sudo
+msg_ok "Installerade beroenden"
 
-# === Installera nödvändiga paket och Creality Print ===
-echo "🔧 Installerar Creality Print i CT $CTID..."
-pct exec $CTID -- bash -c "
-apt update &&
-apt install -y wget git curl software-properties-common xz-utils ca-certificates \
-    libx11-xcb1 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 \
-    libxcb-xinerama0 libxss1 libnss3 libatk1.0-0 libatk-bridge2.0-0 libgtk-3-0 libfuse2 \
-    libasound2 unzip &&
-useradd -m user &&
-cd /home/user &&
-wget https://github.com/CrealityOfficial/CrealityPrint/releases/latest/download/Creality_Print_Linux.zip &&
-unzip Creality_Print_Linux.zip &&
-chmod +x ./CrealityPrint.AppImage &&
-./CrealityPrint.AppImage --appimage-extract &&
-ln -s /home/user/squashfs-root/AppRun /usr/local/bin/crealityprint
-"
+# === Installera Creality Print ===
+msg_info "Installerar Creality Print"
+$STD sudo -u creality bash <<EOF
+curl -sSL https://crealityprint-installers.creality.com/crealityprint-installer.sh | bash
+EOF
+msg_ok "Installerade Creality Print"
 
-# === Installera och konfigurera NGINX för webbaserad åtkomst ===
-echo "🌐 Installerar och konfigurerar NGINX för webbaserad åtkomst..."
-pct exec $CTID -- bash -c "
-apt install -y nginx &&
-mkdir -p /home/user/.config/crealityprint &&
-echo 'server {
-    listen 80;
-    server_name 127.0.0.1;
+# === Skapa användare för Creality Print ===
+msg_info "Skapar användare för Creality Print"
+useradd -m -s /bin/bash -p $(openssl passwd -1 creality) creality
+usermod -aG sudo,tty,dialout creality
+chown -R creality:creality /opt
+echo "creality ALL=NOPASSWD: $(command -v systemctl) restart crealityprint, $(command -v reboot), $(command -v poweroff)" >/etc/sudoers.d/creality
+msg_ok "Skapade användare för Creality Print"
 
-    location / {
-        proxy_pass http://localhost:8888;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    }
-}' > /etc/nginx/sites-available/crealityprint.conf &&
-ln -s /etc/nginx/sites-available/crealityprint.conf /etc/nginx/sites-enabled/ &&
-systemctl restart nginx
-"
+# === Installera Creality Cloud Integration ===
+msg_info "Installerar Creality Cloud Integration"
+$STD sudo -u creality bash <<EOF
+curl -sSL https://cloud.creality.com/installer.sh | bash
+EOF
+msg_ok "Installerade Creality Cloud Integration"
 
-# === Starta om containern för att tillämpa ändringar ===
-echo "🔄 Startar om containern..."
-pct restart $CTID
+# === Skapa systemd service för Creality Print ===
+msg_info "Skapar systemd-tjänst för Creality Print"
+cat <<EOF >/etc/systemd/system/crealityprint.service
+[Unit]
+Description=Creality Print Web Interface
+After=network-online.target
+Wants=network-online.target
 
-echo "✅ Installation klar!"
-echo "🌐 Åtkomst till Creality Print via webbläsaren på port 80."
+[Service]
+Environment="LC_ALL=C.UTF-8"
+Environment="LANG=C.UTF-8"
+Type=exec
+User=creality
+ExecStart=/opt/crealityprint/bin/crealityprint serve
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable -q --now crealityprint
+msg_ok "Skapade systemd-tjänst för Creality Print"
+
+# === Installera och konfigurera NGINX för webbadressåtkomst ===
+msg_info "Installerar och konfigurerar NGINX"
+$STD apt-get install -y nginx
+systemctl enable nginx
+systemctl start nginx
+msg_ok "Installerade och startade NGINX"
+
+# === Rensa upp efter installation ===
+msg_info "Rensar upp efter installation"
+$STD apt-get -y autoremove
+$STD apt-get -y autoclean
+msg_ok "Rensat upp"
+
+# === Bekräftelse ===
+msg_info "Creality Print installation klar!"
+msg_info "Åtkomst till Creality Print via webbläsaren på http://<din-server-ip>:80"
+
