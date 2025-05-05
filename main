@@ -1,0 +1,76 @@
+#!/bin/bash
+
+# === Konfiguration ===
+CTID=112                            # Välj en ledig CT ID
+HOSTNAME="crealityprint"            # Namn på containern
+DISK_SIZE="8G"                      # Diskstorlek
+MEMORY="2048"                       # RAM i MB
+CORES="2"                           # Antal CPU-kärnor
+TEMPLATE="debian-12-standard_*.tar.zst" # LXC-template
+STORAGE="local-lvm"                 # Din Proxmox-lagring
+BRIDGE="vmbr0"                      # Nätverksinterface
+
+# === Kontrollera och hämta template ===
+echo "🔍 Kontrollerar template..."
+if ! pveam available | grep -q "$TEMPLATE"; then
+    echo "📥 Hämtar template..."
+    pveam update
+    pveam download local debian-12-standard_2023-*.tar.zst
+fi
+
+# === Skapa LXC-container ===
+echo "🚧 Skapar LXC-container..."
+pct create $CTID local:vztmpl/$TEMPLATE \
+    --hostname $HOSTNAME \
+    --cores $CORES \
+    --memory $MEMORY \
+    --rootfs $STORAGE:$DISK_SIZE \
+    --net0 name=eth0,bridge=$BRIDGE,ip=dhcp \
+    --ostype debian \
+    --features nesting=1 \
+    --unprivileged 1 \
+    --start 1
+
+# === Installera nödvändiga paket och Creality Print ===
+echo "🔧 Installerar Creality Print i CT $CTID..."
+pct exec $CTID -- bash -c "
+apt update &&
+apt install -y wget git curl software-properties-common xz-utils ca-certificates \
+    libx11-xcb1 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 \
+    libxcb-xinerama0 libxss1 libnss3 libatk1.0-0 libatk-bridge2.0-0 libgtk-3-0 libfuse2 \
+    libasound2 unzip &&
+useradd -m user &&
+cd /home/user &&
+wget https://github.com/CrealityOfficial/CrealityPrint/releases/latest/download/Creality_Print_Linux.zip &&
+unzip Creality_Print_Linux.zip &&
+chmod +x ./CrealityPrint.AppImage &&
+./CrealityPrint.AppImage --appimage-extract &&
+ln -s /home/user/squashfs-root/AppRun /usr/local/bin/crealityprint
+"
+
+# === Installera och konfigurera NGINX för webbaserad åtkomst ===
+echo "🌐 Installerar och konfigurerar NGINX för webbaserad åtkomst..."
+pct exec $CTID -- bash -c "
+apt install -y nginx &&
+mkdir -p /home/user/.config/crealityprint &&
+echo 'server {
+    listen 80;
+    server_name 127.0.0.1;
+
+    location / {
+        proxy_pass http://localhost:8888;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    }
+}' > /etc/nginx/sites-available/crealityprint.conf &&
+ln -s /etc/nginx/sites-available/crealityprint.conf /etc/nginx/sites-enabled/ &&
+systemctl restart nginx
+"
+
+# === Starta om containern för att tillämpa ändringar ===
+echo "🔄 Startar om containern..."
+pct restart $CTID
+
+echo "✅ Installation klar!"
+echo "🌐 Åtkomst till Creality Print via webbläsaren på port 80."
