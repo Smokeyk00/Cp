@@ -6,7 +6,7 @@
 # Source: https://github.com/CrealityOfficial/CrealityPrint
 
 # Import Functions und Setup
-source /dev/stdin <<< "$FUNCTIONS_FILE_PATH"
+source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/install.func)  # Länka till install.func
 color
 verb_ip6
 catch_errors
