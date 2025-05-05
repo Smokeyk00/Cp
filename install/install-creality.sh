@@ -5,6 +5,7 @@ tz="Etc/UTC"  # FIX: Sätt tz innan install.func använder den
 # Copyright...
 # ...
 source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/install.func)
+CACHER="${CACHER:-false}"  # Sätter standardvärde på CACHER om den inte är definierad
 
 # Copyright (c) 2021-2025 community-scripts ORG
 # Author: Smokeyk00
